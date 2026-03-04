@@ -41,14 +41,14 @@ async function saveApproval(obj) {
 }
 
 /** cached message */
-app.get("/message", (req, res) => {
-  res.json(getMessage());
+app.get("/message", async (req, res) => {
+  res.json(await getMessage());
 });
 
 /** fetch next */
 app.post("/fetch", async (req, res) => {
   try {
-    const existing = getMessage();
+    const existing = await getMessage();
     if (existing) return res.json(existing);
 
     const msg = await pollSQS();
@@ -107,7 +107,7 @@ app.post("/approve", async (req, res) => {
     });
 
     // Only poll for next if approveMessage didn't already re-fetch (latestMessage is null)
-    const next = getMessage() ?? await pollSQS();
+    const next = (await getMessage()) ?? await pollSQS();
 
     res.json({ ok: true, record, next });
   } catch (e) {

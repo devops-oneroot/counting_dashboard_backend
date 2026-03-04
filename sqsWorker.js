@@ -103,6 +103,8 @@ import {
 } from "@aws-sdk/client-sqs";
 
 import dotenv from "dotenv";
+import fs from "fs/promises";
+import path from "path";
 dotenv.config();
 
 const client = new SQSClient({
@@ -114,8 +116,37 @@ const client = new SQSClient({
 });
 
 const QUEUE_URL = process.env.SQS_URL;
+const PENDING_FILE = path.resolve(process.cwd(), "pending_message.json");
 
 let latestMessage = null;
+
+// Persist message to disk so it survives server restarts
+async function savePending(msg) {
+  if (msg) {
+    await fs.writeFile(PENDING_FILE, JSON.stringify(msg));
+  } else {
+    await fs.unlink(PENDING_FILE).catch(() => {});
+  }
+}
+
+// Restore persisted message on startup (called lazily on first getMessage())
+async function restoreFromDisk() {
+  try {
+    const raw = await fs.readFile(PENDING_FILE, "utf-8");
+    latestMessage = JSON.parse(raw);
+    console.log("Restored pending message from disk:", latestMessage?.id);
+  } catch {
+    // No file or parse error — start fresh
+  }
+}
+
+let restored = false;
+async function ensureRestored() {
+  if (!restored) {
+    restored = true;
+    await restoreFromDisk();
+  }
+}
 
 /** ⭐ SAFE PARSER */
 function parseBody(body) {
@@ -146,6 +177,7 @@ export async function pollSQS() {
 
   if (!res.Messages?.length) {
     latestMessage = null;
+    await savePending(null);
     return null;
   }
 
@@ -157,12 +189,15 @@ export async function pollSQS() {
     receipt: msg.ReceiptHandle,
   };
 
+  await savePending(latestMessage);
   return latestMessage;
 }
 
-export function getMessage() {
+export async function getMessage() {
+  await ensureRestored();
   return latestMessage;
 }
+
 export async function approveMessage(receipt) {
   if (!receipt) return;
 
@@ -175,6 +210,7 @@ export async function approveMessage(receipt) {
     );
 
     latestMessage = null;
+    await savePending(null);
   } catch (e) {
     if (e.message?.includes("ReceiptHandle")) {
       // Receipt expired: re-fetch to get a fresh receipt, then delete immediately
@@ -189,6 +225,7 @@ export async function approveMessage(receipt) {
           }),
         );
         latestMessage = null;
+        await savePending(null);
       }
       return;
     }
@@ -205,4 +242,5 @@ export async function deleteAllMessages() {
   );
 
   latestMessage = null;
+  await savePending(null);
 }
