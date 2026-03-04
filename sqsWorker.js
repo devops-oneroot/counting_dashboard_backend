@@ -100,6 +100,7 @@ import {
   ReceiveMessageCommand,
   DeleteMessageCommand,
   PurgeQueueCommand,
+  ChangeMessageVisibilityCommand,
 } from "@aws-sdk/client-sqs";
 
 import dotenv from "dotenv";
@@ -164,33 +165,73 @@ function parseBody(body) {
   }
 }
 
+// Keep the active message invisible for 12 hours by extending visibility periodically
+let extendTimer = null;
+
+function startVisibilityExtender(receiptHandle) {
+  stopVisibilityExtender();
+  // Extend every 10 minutes (well before the 15-min visibility expires)
+  extendTimer = setInterval(async () => {
+    try {
+      await client.send(
+        new ChangeMessageVisibilityCommand({
+          QueueUrl: QUEUE_URL,
+          ReceiptHandle: receiptHandle,
+          VisibilityTimeout: 900, // extend by another 15 min
+        }),
+      );
+      console.log("Extended visibility for active message");
+    } catch (e) {
+      console.log("Failed to extend visibility:", e.message);
+      stopVisibilityExtender();
+    }
+  }, 10 * 60 * 1000); // every 10 minutes
+}
+
+function stopVisibilityExtender() {
+  if (extendTimer) {
+    clearInterval(extendTimer);
+    extendTimer = null;
+  }
+}
+
 /** poll */
 export async function pollSQS() {
-  const res = await client.send(
-    new ReceiveMessageCommand({
-      QueueUrl: QUEUE_URL,
-      MaxNumberOfMessages: 1,
-      WaitTimeSeconds: 5,
-      VisibilityTimeout: 43200, // 12 hours — SQS max; prevents receipt expiry during normal use
-    }),
-  );
+  try {
+    const res = await client.send(
+      new ReceiveMessageCommand({
+        QueueUrl: QUEUE_URL,
+        MaxNumberOfMessages: 1,
+        WaitTimeSeconds: 5,
+        VisibilityTimeout: 900, // 15 min initial — extended automatically while active
+      }),
+    );
 
-  if (!res.Messages?.length) {
-    latestMessage = null;
-    await savePending(null);
-    return null;
+    console.log("SQS poll result:", res.Messages?.length ?? 0, "messages");
+
+    if (!res.Messages?.length) {
+      // DON'T wipe latestMessage here — only return null to indicate "nothing new"
+      return null;
+    }
+
+    const msg = res.Messages[0];
+
+    latestMessage = {
+      id: msg.MessageId,
+      body: parseBody(msg.Body),
+      receipt: msg.ReceiptHandle,
+    };
+
+    // Auto-extend visibility so the message stays hidden while the operator works on it
+    startVisibilityExtender(msg.ReceiptHandle);
+
+    console.log("Polled message:", latestMessage.id);
+    await savePending(latestMessage);
+    return latestMessage;
+  } catch (e) {
+    console.error("pollSQS error:", e.message);
+    throw e;
   }
-
-  const msg = res.Messages[0];
-
-  latestMessage = {
-    id: msg.MessageId,
-    body: parseBody(msg.Body), // ⭐ IMPORTANT → object now
-    receipt: msg.ReceiptHandle,
-  };
-
-  await savePending(latestMessage);
-  return latestMessage;
 }
 
 export async function getMessage() {
@@ -200,6 +241,8 @@ export async function getMessage() {
 
 export async function approveMessage(receipt) {
   if (!receipt) return;
+
+  stopVisibilityExtender();
 
   try {
     await client.send(
@@ -211,17 +254,18 @@ export async function approveMessage(receipt) {
 
     latestMessage = null;
     await savePending(null);
+    console.log("Message deleted from SQS");
   } catch (e) {
     if (e.message?.includes("ReceiptHandle")) {
-      // Receipt expired: re-fetch to get a fresh receipt, then delete immediately
       console.log("Receipt expired → re-fetching and deleting");
-      await pollSQS();
+      const fresh = await pollSQS();
 
-      if (latestMessage?.receipt) {
+      if (fresh?.receipt) {
+        stopVisibilityExtender(); // stop the one pollSQS just started
         await client.send(
           new DeleteMessageCommand({
             QueueUrl: QUEUE_URL,
-            ReceiptHandle: latestMessage.receipt,
+            ReceiptHandle: fresh.receipt,
           }),
         );
         latestMessage = null;
@@ -235,6 +279,8 @@ export async function approveMessage(receipt) {
 }
 
 export async function deleteAllMessages() {
+  stopVisibilityExtender();
+
   await client.send(
     new PurgeQueueCommand({
       QueueUrl: QUEUE_URL,
