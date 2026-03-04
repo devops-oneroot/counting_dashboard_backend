@@ -140,7 +140,7 @@ export async function pollSQS() {
       QueueUrl: QUEUE_URL,
       MaxNumberOfMessages: 1,
       WaitTimeSeconds: 5,
-      VisibilityTimeout: 900,
+      VisibilityTimeout: 43200, // 12 hours — SQS max; prevents receipt expiry during normal use
     }),
   );
 
@@ -176,10 +176,20 @@ export async function approveMessage(receipt) {
 
     latestMessage = null;
   } catch (e) {
-    // ⭐ receipt expired → get fresh message
     if (e.message?.includes("ReceiptHandle")) {
-      console.log("Receipt expired → repolling");
+      // Receipt expired: re-fetch to get a fresh receipt, then delete immediately
+      console.log("Receipt expired → re-fetching and deleting");
       await pollSQS();
+
+      if (latestMessage?.receipt) {
+        await client.send(
+          new DeleteMessageCommand({
+            QueueUrl: QUEUE_URL,
+            ReceiptHandle: latestMessage.receipt,
+          }),
+        );
+        latestMessage = null;
+      }
       return;
     }
 

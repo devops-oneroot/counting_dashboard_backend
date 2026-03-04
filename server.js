@@ -106,7 +106,8 @@ app.post("/approve", async (req, res) => {
       approved_count: Number(approvedValue),
     });
 
-    const next = await pollSQS();
+    // Only poll for next if approveMessage didn't already re-fetch (latestMessage is null)
+    const next = getMessage() ?? await pollSQS();
 
     res.json({ ok: true, record, next });
   } catch (e) {
