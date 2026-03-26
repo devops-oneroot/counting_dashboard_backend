@@ -512,8 +512,55 @@ app.put("/approval/:id", async (req, res) => {
 
 /** approvals list */
 app.get("/approvals", async (req, res) => {
-  const list = await Approval.find().sort({ createdAt: -1 });
-  res.json(list);
+  try {
+    const { truck_number, date, page, limit } = req.query;
+    const query = {};
+    const currentPage = Math.max(1, Number(page) || 1);
+    const pageSize = Math.min(800, Math.max(1, Number(limit) || 800));
+
+    if (typeof truck_number === "string" && truck_number.trim()) {
+      const escapedTruckNumber = truck_number
+        .trim()
+        .replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      query.truck_number = {
+        $regex: `^${escapedTruckNumber}$`,
+        $options: "i",
+      };
+    }
+
+    if (typeof date === "string" && date.trim()) {
+      const start = new Date(`${date}T00:00:00`);
+      if (Number.isNaN(start.getTime())) {
+        return res.status(400).json({ error: "Invalid date filter" });
+      }
+
+      const end = new Date(start);
+      end.setDate(end.getDate() + 1);
+
+      query.createdAt = {
+        $gte: start,
+        $lt: end,
+      };
+    }
+
+    const total = await Approval.countDocuments(query);
+    const list = await Approval.find(query)
+      .sort({ createdAt: -1 })
+      .skip((currentPage - 1) * pageSize)
+      .limit(pageSize);
+
+    res.json({
+      data: list,
+      pagination: {
+        page: currentPage,
+        limit: pageSize,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / pageSize)),
+      },
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 /** delete all messages */
@@ -628,19 +675,52 @@ app.get("/totals/counts", async (req, res) => {
 
 app.put("/totals/complete", async (req, res) => {
   try {
-    const { date, truck_number } = req.body;
+    const { date: rawDate, truck_number, entries, totalApproved } = req.body;
 
-    if (!date || !truck_number) {
+    if (!rawDate || !truck_number) {
       return res.status(400).json({ error: "Date and truck_number required" });
+    }
+
+    const normalizedTruck = String(truck_number).trim();
+    const normalizedDate = new Date(rawDate);
+
+    if (Number.isNaN(normalizedDate.getTime())) {
+      return res.status(400).json({ error: "Invalid date" });
+    }
+
+    const date = normalizedDate;
+
+    const update = {
+      $set: { sqsCountComplete: true },
+      $setOnInsert: {
+        truck_number: normalizedTruck,
+        date,
+      },
+    };
+
+    if (entries !== undefined) {
+      const parsedEntries = Number(entries);
+      if (Number.isNaN(parsedEntries) || parsedEntries < 0) {
+        return res.status(400).json({ error: "Invalid entries value" });
+      }
+      update.$set.entries = parsedEntries;
+    }
+
+    if (totalApproved !== undefined) {
+      const parsedTotalApproved = Number(totalApproved);
+      if (Number.isNaN(parsedTotalApproved) || parsedTotalApproved < 0) {
+        return res.status(400).json({ error: "Invalid totalApproved value" });
+      }
+      update.$set.totalApproved = parsedTotalApproved;
     }
 
     const updated = await TodayTotal.findOneAndUpdate(
       {
-        truck_number,
+        truck_number: normalizedTruck,
         date, // ✅ STRING match (IMPORTANT)
       },
-      { sqsCountComplete: true },
-      { new: true, upsert: true },
+      update,
+      { new: true, upsert: true, runValidators: true },
     );
 
     if (!updated) {
