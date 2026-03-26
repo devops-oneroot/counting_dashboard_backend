@@ -1,0 +1,6 @@
+{
+  "forwardKey": "ArrowRight",
+  "backwardKey": "ArrowLeft",
+  "forwardSeconds": 10,
+  "backwardSeconds": 10
+}
