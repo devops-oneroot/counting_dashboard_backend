@@ -400,6 +400,19 @@ async function saveApproval(obj) {
   await fs.writeFile(APPROVALS_FILE, JSON.stringify(arr, null, 2));
 }
 
+function normalizeDateKey(value) {
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value.trim())) {
+    return value.trim();
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+
+  return parsed.toISOString().slice(0, 10);
+}
+
 async function readPlaybackConfig() {
   try {
     const raw = await fs.readFile(PLAYBACK_CONFIG_FILE, "utf-8");
@@ -626,7 +639,20 @@ app.post("/deleteAll", async (req, res) => {
 
 app.get("/totals/counts", async (req, res) => {
   try {
+    const date =
+      normalizeDateKey(req.query.date) || new Date().toISOString().slice(0, 10);
+    const start = new Date(`${date}T00:00:00.000Z`);
+    const end = new Date(`${date}T23:59:59.999Z`);
+
     const data = await Approval.aggregate([
+      {
+        $match: {
+          createdAt: {
+            $gte: start,
+            $lte: end,
+          },
+        },
+      },
       {
         $group: {
           _id: "$truck_number",
@@ -644,34 +670,41 @@ app.get("/totals/counts", async (req, res) => {
       },
     ]);
 
+    const results = [];
+
+    for (const item of data) {
+      const updated = await TodayTotal.findOneAndUpdate(
+        {
+          truck_number: item.truck_number,
+          date,
+        },
+        {
+          $set: {
+            totalApproved: item.totalApproved,
+            entries: item.entries,
+          },
+          $setOnInsert: {
+            sqsCountComplete: false,
+          },
+        },
+        {
+          new: true,
+          upsert: true,
+        },
+      );
+
+      results.push(updated);
+    }
+
     res.json({
-      message: "Total counts fetched successfully",
-      data,
+      message: "Total counts synced successfully",
+      date,
+      data: results,
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
-
-// app.put("/totals/complete", async (req, res) => {
-//   try {
-//     const { date, truck_number } = req.body;
-//     if (!date || !truck_number) {
-//       return res.status(400).json({ error: "Date and truck_number required" });
-//     }
-//     const updated = await TodayTotal.findOneAndUpdate(
-//       { truck_number, date },
-//       { sqsCountComplete: true },
-//       { new: true },
-//     );
-//     if (!updated) {
-//       return res.status(404).json({ error: "Record not found" });
-//     }
-//     res.json({ message: "SQS Count marked complete ✅", data: updated });
-//   } catch (e) {
-//     res.status(500).json({ error: e.message });
-//   }
-// });
 
 app.put("/totals/complete", async (req, res) => {
   try {
@@ -682,13 +715,11 @@ app.put("/totals/complete", async (req, res) => {
     }
 
     const normalizedTruck = String(truck_number).trim();
-    const normalizedDate = new Date(rawDate);
+    const date = normalizeDateKey(rawDate);
 
-    if (Number.isNaN(normalizedDate.getTime())) {
+    if (!date) {
       return res.status(400).json({ error: "Invalid date" });
     }
-
-    const date = normalizedDate;
 
     const update = {
       $set: { sqsCountComplete: true },
