@@ -425,7 +425,33 @@ app.post("/deleteAll", async (req, res) => {
 
 app.get("/totals/counts", async (req, res) => {
   try {
+    // ✅ GET QUERY PARAMS
+    const { truck_number, date, page = 1, limit = 10 } = req.query;
+
+    // ✅ BUILD MATCH FILTER (before group)
+    const matchStage = {};
+
+    // 🔹 Truck filter
+    if (truck_number) {
+      matchStage.truck_number = truck_number;
+    }
+
+    // 🔹 Simple specific date filter
+    if (date) {
+      matchStage.$expr = {
+        $eq: [
+          { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+          date,
+        ],
+      };
+    }
+
     const data = await Approval.aggregate([
+      // ✅ MATCH
+      {
+        $match: matchStage,
+      },
+
       {
         $group: {
           _id: {
@@ -447,8 +473,6 @@ app.get("/totals/counts", async (req, res) => {
           _id: 0,
         },
       },
-
-      // ✅ ADD THIS
       {
         $addFields: {
           dateObj: { $toDate: "$date" },
@@ -460,6 +484,7 @@ app.get("/totals/counts", async (req, res) => {
         },
       },
     ]);
+
     const results = [];
 
     for (const item of data) {
@@ -493,15 +518,22 @@ app.get("/totals/counts", async (req, res) => {
           { new: true, upsert: true },
         );
       } else {
-        result = existing; // ✅ no update
+        result = existing;
       }
 
       results.push(result);
     }
 
+    // ✅ PAGINATION
+    const skip = (Number(page) - 1) * Number(limit);
+    const paginatedResults = results.slice(skip, skip + Number(limit));
+
     res.json({
       message: "Saved + fetched all data",
-      data: results,
+      total: results.length,
+      page: Number(page),
+      limit: Number(limit),
+      data: paginatedResults,
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
