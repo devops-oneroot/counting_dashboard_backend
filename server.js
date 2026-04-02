@@ -425,29 +425,6 @@ app.post("/deleteAll", async (req, res) => {
 
 app.get("/totals/counts", async (req, res) => {
   try {
-    // const data = await Approval.aggregate([
-    //   {
-    //     $group: {
-    //       _id: {
-    //         truck_number: "$truck_number",
-    //         date: {
-    //           $dateToString: { format: "%Y-%m-%d", date: "$createdAt" },
-    //         },
-    //       },
-    //       totalApproved: { $sum: "$approved_count" },
-    //       entries: { $sum: 1 },
-    //     },
-    //   },
-    //   {
-    //     $project: {
-    //       truck_number: "$_id.truck_number",
-    //       date: "$_id.date",
-    //       totalApproved: 1,
-    //       entries: 1,
-    //       _id: 0,
-    //     },
-    //   },
-    // ]);
     const data = await Approval.aggregate([
       {
         $group: {
